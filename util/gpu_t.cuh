@@ -9,7 +9,14 @@
 # include <cuda_runtime.h>
 #endif
 
+#ifndef SPPARK_NO_CXX_RUNTIME
 #include "thread_pool_t.hpp"
+#else
+#include <atomic>
+#include <vector>
+#include <cstdlib>
+#include <cstring>
+#endif
 #include "exception.cuh"
 #include "slice_t.hpp"
 
@@ -179,7 +186,9 @@ private:
     size_t total_mem;
     mutable stream_t zero = {gpu_id};
     mutable stream_t flipflop[FLIP_FLOP] = {gpu_id, gpu_id, gpu_id};
+#ifndef SPPARK_NO_CXX_RUNTIME
     mutable thread_pool_t pool{"SPPARK_GPU_T_AFFINITY"};
+#endif
 
 public:
     gpu_t(int id, int real_id, const cudaDeviceProp& p)
@@ -198,6 +207,7 @@ public:
     inline operator stream_t&() const       { return zero; }
     inline operator cudaStream_t() const    { return zero; }
 
+#ifndef SPPARK_NO_CXX_RUNTIME
     inline size_t ncpus() const             { return pool.size(); }
     template<class Workable>
     inline void spawn(Workable work) const  { pool.spawn(work); }
@@ -205,6 +215,7 @@ public:
     inline void par_map(size_t num_items, size_t stride, Workable work,
                         size_t max_workers = 0) const
     {   pool.par_map(num_items, stride, work, max_workers);   }
+#endif
 
     inline void* Dmalloc(size_t sz) const
     {   void *d_ptr = zero.Dmalloc(sz);

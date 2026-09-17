@@ -1,4 +1,5 @@
 #include "gpu_t.cuh"
+#include <cstdlib>
 
 #if defined(__NVCC__)
 # define PROP_MAJOR_MIN 7   // Volta and forward
@@ -36,11 +37,36 @@ public:
     }
 };
 
+#ifdef SPPARK_NO_CXX_RUNTIME
+// libstdc++'s container headers call these on impossible growth and are
+// defined in its runtime library. Without that library nothing can be
+// thrown, so the process ends; weak, so a real definition wins if one is
+// linked after all.
+namespace std {
+__attribute__((weak)) void __throw_length_error(const char*) { abort(); }
+__attribute__((weak)) void __throw_bad_alloc() { abort(); }
+__attribute__((weak)) void __throw_bad_array_new_length() { abort(); }
+}
+
+static thread_local int sppark_cuda_error = 0;
+
+extern "C" void sppark_record_cuda_error(int code)
+{   if (sppark_cuda_error == 0) sppark_cuda_error = code;   }
+
+extern "C" int sppark_take_cuda_error()
+{   int code = sppark_cuda_error; sppark_cuda_error = 0; return code;   }
+#endif
+
 const gpu_t& select_gpu(int id)
 {
     auto& gpus = gpus_t::all();
-    if (gpus.size() == 0)
+    if (gpus.size() == 0) {
         CUDA_OK(cudaErrorNoDevice);
+#ifdef SPPARK_NO_CXX_RUNTIME
+        // Nothing to return without a device; callers check ngpus() first.
+        abort();
+#endif
+    }
     if (id == -1) {
         int cuda_id;
         CUDA_OK(cudaGetDevice(&cuda_id));

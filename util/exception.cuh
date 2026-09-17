@@ -9,6 +9,21 @@
 
 using cuda_error = sppark_error;
 
+#ifdef SPPARK_NO_CXX_RUNTIME
+// A failing CUDA call is recorded per thread instead of thrown, and the
+// caller of the device-pointer interfaces reads it back with
+// sppark_take_cuda_error(). Nothing in the transform paths then needs the
+// C++ runtime library (std::string, std::runtime_error, std::thread), so
+// the archive links into programs built on another C++ runtime.
+extern "C" void sppark_record_cuda_error(int code);
+extern "C" int sppark_take_cuda_error();
+
+#define CUDA_OK(expr) do {                                  \
+    cudaError_t code = expr;                                \
+    if (code != cudaSuccess)                                \
+        sppark_record_cuda_error(static_cast<int>(code));   \
+} while(0)
+#else
 #define CUDA_OK(expr) do {                                  \
     cudaError_t code = expr;                                \
     if (code != cudaSuccess) {                              \
@@ -19,5 +34,6 @@ using cuda_error = sppark_error;
         throw cuda_error{-code, str};                       \
     }                                                       \
 } while(0)
+#endif
 
 #endif
