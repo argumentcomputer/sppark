@@ -64,11 +64,17 @@ struct launch_params_t {
 class stream_t {
     cudaStream_t stream;
     const int gpu_id;
+    const bool owns_stream;
 public:
-    stream_t(int id) : gpu_id(id)
+    stream_t(int id) : gpu_id(id), owns_stream(true)
     {   CUDA_OK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));   }
+    // The caller retains ownership and keeps the stream alive for every launch.
+    stream_t(int id, cudaStream_t borrowed)
+        : stream(borrowed), gpu_id(id), owns_stream(false) {}
+    stream_t(const stream_t&) = delete;
+    stream_t& operator=(const stream_t&) = delete;
     ~stream_t()
-    {   (void)cudaStreamDestroy(stream);   }
+    {   if (owns_stream) (void)cudaStreamDestroy(stream);   }
     inline operator decltype(stream)() const    { return stream; }
     inline int id() const                       { return gpu_id; }
     inline operator int() const                 { return gpu_id; }

@@ -35,6 +35,11 @@ arithmetic and the kernels' scheduling are upstream's.
   and the permutation and coset passes looping over the batch. A batch of
   one is the unchanged single-vector path.
 
+The runtime also supports `stream_t(id, cudaStream_t)` as a non-owning
+wrapper. Its destruction leaves the caller's stream alive; the caller must
+keep it alive through every operation enqueued through the wrapper. The id
+is sppark's logical device index, which can differ from the CUDA ordinal.
+
 ## General notes on implementation
 
 The goal of the sppark library is to provide foundational components for applications and other libraries that require high-performance operations for zero-knowledge proofs generation.
