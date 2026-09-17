@@ -17,6 +17,24 @@ sppark (pronounced 'spark') is **S**upranational's **p**erformance **p**rimitive
 
 **This library is under active development [with a list of planned significant improvements]**
 
+## Changes in this fork
+
+This fork, branch `dev`, carries two additions to upstream for the
+[multi-stark](https://github.com/argumentcomputer/multi-stark) prover; the
+arithmetic and the kernels' scheduling are upstream's.
+
+- `SPPARK_NO_CXX_RUNTIME` (`util/exception.cuh`, `util/gpu_t.cuh`,
+  `util/all_gpus.cpp`): a build mode in which `CUDA_OK` ends the process
+  with the failing expression, location and CUDA error instead of throwing,
+  `gpu_t` carries no thread pool, and the three container error hooks
+  libstdc++'s headers call are defined weakly to abort. The archive then
+  references nothing from libstdc++ and links into a libc++ program.
+- `NTT::Base_dev_ptr_batch` (`ntt/ntt.cuh`, `ntt/kernels/*.cu`): a batch of
+  vectors laid out a stride apart transformed in one launch sequence, the
+  mixed-radix kernels taking the vector from the grid's second dimension
+  and the permutation and coset passes looping over the batch. A batch of
+  one is the unchanged single-vector path.
+
 ## General notes on implementation
 
 The goal of the sppark library is to provide foundational components for applications and other libraries that require high-performance operations for zero-knowledge proofs generation.
