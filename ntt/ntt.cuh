@@ -99,9 +99,11 @@ private:
 
     static void CT_NTT(fr_t* d_inout, const int lg_domain_size, bool intt,
                        const NTTParameters& ntt_parameters,
-                       const stream_t& stream)
+                       const stream_t& stream,
+                       uint32_t batch = 1, index_t batch_stride = 0)
     {
-        CT_launcher params{d_inout, lg_domain_size, intt, ntt_parameters, stream};
+        CT_launcher params{d_inout, lg_domain_size, intt, ntt_parameters, stream,
+                           batch, batch_stride};
 
         if (lg_domain_size <= 10) {
             params.step(lg_domain_size);
@@ -129,9 +131,11 @@ private:
 
     static void GS_NTT(fr_t* d_inout, const int lg_domain_size, const bool is_intt,
                        const NTTParameters& ntt_parameters,
-                       const stream_t& stream)
+                       const stream_t& stream,
+                       uint32_t batch = 1, index_t batch_stride = 0)
     {
-        GS_launcher params{d_inout, lg_domain_size, is_intt, ntt_parameters, stream};
+        GS_launcher params{d_inout, lg_domain_size, is_intt, ntt_parameters, stream,
+                           batch, batch_stride};
 
         if (lg_domain_size <= 10) {
             params.step(lg_domain_size);
@@ -158,10 +162,17 @@ private:
     }
 
 protected:
+    // A batch of independent vectors, batch_stride elements apart (the
+    // domain size when 0), transformed by the same launch sequence; the
+    // permutation and coset passes, which upstream runs per vector, loop.
     static void NTT_internal(fr_t* d_inout, uint32_t lg_domain_size,
                              InputOutputOrder order, Direction direction,
-                             Type type, stream_t& stream)
+                             Type type, stream_t& stream,
+                             uint32_t batch = 1, index_t batch_stride = 0)
     {
+        if (batch_stride == 0)
+            batch_stride = (index_t)1 << lg_domain_size;
+        assert(batch >= 1 && batch <= 65535);
         // Pick an NTT algorithm based on the input order and the desired output
         // order of the data. In certain cases, bit reversal can be avoided which
         // results in a considerable performance gain.
@@ -173,7 +184,10 @@ protected:
 
         switch (order) {
             case InputOutputOrder::NN:
-                bit_rev(d_inout, d_inout, lg_domain_size, stream);
+                for (uint32_t b = 0; b < batch; b++)
+                    bit_rev(d_inout + (size_t)b * batch_stride,
+                            d_inout + (size_t)b * batch_stride,
+                            lg_domain_size, stream);
                 bitrev = true;
                 algorithm = Algorithm::CT;
                 break;
@@ -194,22 +208,31 @@ protected:
         }
 
         if (!intt && type == Type::coset)
-            LDE_powers(d_inout, intt, bitrev, lg_domain_size, 0, stream);
+            for (uint32_t b = 0; b < batch; b++)
+                LDE_powers(d_inout + (size_t)b * batch_stride, intt, bitrev,
+                           lg_domain_size, 0, stream);
 
         switch (algorithm) {
             case Algorithm::GS:
-                GS_NTT(d_inout, lg_domain_size, intt, ntt_parameters, stream);
+                GS_NTT(d_inout, lg_domain_size, intt, ntt_parameters, stream,
+                       batch, batch_stride);
                 break;
             case Algorithm::CT:
-                CT_NTT(d_inout, lg_domain_size, intt, ntt_parameters, stream);
+                CT_NTT(d_inout, lg_domain_size, intt, ntt_parameters, stream,
+                       batch, batch_stride);
                 break;
         }
 
         if (intt && type == Type::coset)
-            LDE_powers(d_inout, intt, !bitrev, lg_domain_size, 0, stream);
+            for (uint32_t b = 0; b < batch; b++)
+                LDE_powers(d_inout + (size_t)b * batch_stride, intt, !bitrev,
+                           lg_domain_size, 0, stream);
 
         if (order == InputOutputOrder::RR)
-            bit_rev(d_inout, d_inout, lg_domain_size, stream);
+            for (uint32_t b = 0; b < batch; b++)
+                bit_rev(d_inout + (size_t)b * batch_stride,
+                        d_inout + (size_t)b * batch_stride,
+                        lg_domain_size, stream);
     }
 
 public:
@@ -347,6 +370,20 @@ public:
     {
         NTT_internal(&d_inout[0], lg_domain_size, order, direction, type,
                      stream);
+    }
+
+    // `batch` vectors of 2^lg_domain_size elements each, batch_stride
+    // elements apart (the domain size when 0), transformed in one launch
+    // sequence: every kernel of the sequence covers all of them through the
+    // grid's second dimension, so short vectors no longer pay a launch each.
+    static void Base_dev_ptr_batch(stream_t& stream, fr_t* d_inout,
+                                   uint32_t lg_domain_size,
+                                   InputOutputOrder order,
+                                   Direction direction, Type type,
+                                   uint32_t batch, index_t batch_stride = 0)
+    {
+        NTT_internal(&d_inout[0], lg_domain_size, order, direction, type,
+                     stream, batch, batch_stride);
     }
 
     static void LDE_powers(stream_t& stream, fr_t* d_inout,

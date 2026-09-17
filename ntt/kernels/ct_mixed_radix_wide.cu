@@ -9,13 +9,16 @@ void _CT_NTT(fr_t* d_inout, const unsigned int lg_domain_size,
              const fr_t (*d_partial_twiddles)[WINDOW_SIZE],
              const fr_t d_inner_twiddles[512],
              const fr_t d_stageX_twiddles[512][512],
-             const bool is_intt, const fr_t d_domain_size_inverse)
+             const bool is_intt, const fr_t d_domain_size_inverse,
+             const index_t batch_stride)
 {
 #if (__CUDACC_VER_MAJOR__-0) >= 11 || defined(__clang__)
     __builtin_assume(lg_domain_size <= MAX_LG_DOMAIN_SIZE);
     __builtin_assume(iterations <= 10);
     __builtin_assume(stage <= lg_domain_size - iterations);
 #endif
+
+    d_inout += (size_t)blockIdx.y * batch_stride;
 
     const index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
 
@@ -142,12 +145,16 @@ class CT_launcher {
     const NTTParameters& ntt_parameters;
     const stream_t& stream;
     int min_radix;
+    const uint32_t batch;
+    const index_t batch_stride;
 
 public:
     CT_launcher(fr_t* d_ptr, int lg_dsz, bool intt,
-                const NTTParameters& params, const stream_t& s)
+                const NTTParameters& params, const stream_t& s,
+                uint32_t batch = 1, index_t batch_stride = 0)
       : d_inout(d_ptr), lg_domain_size(lg_dsz), is_intt(intt), stage(0),
-        ntt_parameters(params), stream(s)
+        ntt_parameters(params), stream(s), batch(batch),
+        batch_stride(batch_stride ? batch_stride : (index_t)1 << lg_dsz)
     {   min_radix = lg2(gpu_props(s).warpSize) + 1;   }
 
     void step(int iterations)
@@ -166,13 +173,13 @@ public:
         assert(num_blocks == (unsigned int)num_blocks);
 
         #define NTT_CONFIGURATION \
-                num_blocks, block_size, sizeof(fr_t) * block_size, stream
+                dim3((unsigned)num_blocks, batch), block_size, sizeof(fr_t) * block_size, stream
 
         #define NTT_ARGUMENTS d_inout, lg_domain_size, stage, iterations, \
                 ntt_parameters.partial_twiddles, \
                 ntt_parameters.inner_twiddles, \
                 ntt_parameters.stageX_twiddles, \
-                is_intt, domain_size_inverse[lg_domain_size]
+                is_intt, domain_size_inverse[lg_domain_size], batch_stride
 
         if (stage == 0)
             _CT_NTT<0><<<NTT_CONFIGURATION>>>(NTT_ARGUMENTS);

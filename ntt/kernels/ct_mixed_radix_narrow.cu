@@ -9,7 +9,8 @@ void _CT_NTT(fr_t* d_inout, const unsigned int lg_domain_size,
              const fr_t (*d_partial_twiddles)[WINDOW_SIZE],
              const fr_t (*d_plus_one_twiddles)[1024],
              const fr_t* d_inner_twiddles,
-             bool is_intt, const fr_t d_domain_size_inverse)
+             bool is_intt, const fr_t d_domain_size_inverse,
+             const index_t batch_stride)
 {
 #if (__CUDACC_VER_MAJOR__-0) >= 11 || defined(__clang__)
     __builtin_assume(lg_domain_size <= MAX_LG_DOMAIN_SIZE);
@@ -17,6 +18,10 @@ void _CT_NTT(fr_t* d_inout, const unsigned int lg_domain_size,
     __builtin_assume(stage <= lg_domain_size - iterations);
 #endif
     extern __shared__ fr_t shared_exchange[];
+
+    // blockIdx.y selects one of a batch of independent vectors laid out
+    // batch_stride elements apart; every stage runs over all of them.
+    d_inout += (size_t)blockIdx.y * batch_stride;
 
     index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
 
@@ -193,12 +198,16 @@ class CT_launcher {
     int stage;
     const NTTParameters& ntt_parameters;
     const stream_t& stream;
+    const uint32_t batch;
+    const index_t batch_stride;
 
 public:
     CT_launcher(fr_t* d_ptr, int lg_dsz, bool intt,
-                const NTTParameters& params, const stream_t& s)
+                const NTTParameters& params, const stream_t& s,
+                uint32_t batch = 1, index_t batch_stride = 0)
       : d_inout(d_ptr), lg_domain_size(lg_dsz), is_intt(intt), stage(0),
-        ntt_parameters(params), stream(s)
+        ntt_parameters(params), stream(s), batch(batch),
+        batch_stride(batch_stride ? batch_stride : (index_t)1 << lg_dsz)
     {}
 
     void step(int iterations)
@@ -223,14 +232,14 @@ public:
                 ntt_parameters.partial_twiddles, \
                 ntt_parameters.plus_one_twiddles, \
                 ntt_parameters.inner_twiddles, \
-                is_intt, domain_size_inverse[lg_domain_size]
+                is_intt, domain_size_inverse[lg_domain_size], batch_stride
 
         if (num_blocks < Z_COUNT)
-            _CT_NTT<1><<<num_blocks, block_size, shared_sz, stream>>>(NTT_ARGUMENTS);
+            _CT_NTT<1><<<dim3((unsigned)num_blocks, batch), block_size, shared_sz, stream>>>(NTT_ARGUMENTS);
         else if (stage == 0 || lg_domain_size < 12)
-            _CT_NTT<Z_COUNT><<<num_blocks/Z_COUNT, block_size, Z_COUNT*shared_sz, stream>>>(NTT_ARGUMENTS);
+            _CT_NTT<Z_COUNT><<<dim3((unsigned)(num_blocks/Z_COUNT), batch), block_size, Z_COUNT*shared_sz, stream>>>(NTT_ARGUMENTS);
         else
-            _CT_NTT<Z_COUNT, true><<<num_blocks/Z_COUNT, block_size, Z_COUNT*shared_sz, stream>>>(NTT_ARGUMENTS);
+            _CT_NTT<Z_COUNT, true><<<dim3((unsigned)(num_blocks/Z_COUNT), batch), block_size, Z_COUNT*shared_sz, stream>>>(NTT_ARGUMENTS);
 
         #undef NTT_ARGUMENTS
 
