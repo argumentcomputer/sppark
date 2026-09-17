@@ -1,5 +1,7 @@
 #include "gpu_t.cuh"
 #include <cstdlib>
+#include <cstdio>
+#include <cstring>
 
 #if defined(__NVCC__)
 # define PROP_MAJOR_MIN 7   // Volta and forward
@@ -48,25 +50,23 @@ __attribute__((weak)) void __throw_bad_alloc() { abort(); }
 __attribute__((weak)) void __throw_bad_array_new_length() { abort(); }
 }
 
-static thread_local int sppark_cuda_error = 0;
-
-extern "C" void sppark_record_cuda_error(int code)
-{   if (sppark_cuda_error == 0) sppark_cuda_error = code;   }
-
-extern "C" int sppark_take_cuda_error()
-{   int code = sppark_cuda_error; sppark_cuda_error = 0; return code;   }
+extern "C" [[noreturn]] void sppark_cuda_fail(const char* expr, const char* file,
+                                              int line, int code)
+{
+    const char* base = strstr(file, "sppark");
+    fprintf(stderr, "sppark: %s at %s:%d failed: %s\n", expr,
+            base ? base : file, line,
+            cudaGetErrorString(static_cast<cudaError_t>(code)));
+    fflush(stderr);
+    abort();
+}
 #endif
 
 const gpu_t& select_gpu(int id)
 {
     auto& gpus = gpus_t::all();
-    if (gpus.size() == 0) {
+    if (gpus.size() == 0)
         CUDA_OK(cudaErrorNoDevice);
-#ifdef SPPARK_NO_CXX_RUNTIME
-        // Nothing to return without a device; callers check ngpus() first.
-        abort();
-#endif
-    }
     if (id == -1) {
         int cuda_id;
         CUDA_OK(cudaGetDevice(&cuda_id));
