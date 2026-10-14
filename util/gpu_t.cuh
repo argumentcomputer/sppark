@@ -277,6 +277,9 @@ public:
 
     inline void sync() const
     {
+        // A host thread may synchronize every device in turn, as NTT
+        // parameter setup does; each stream belongs to this device's context.
+        select();
         zero.sync();
         for (auto& f : flipflop)
             f.sync();
