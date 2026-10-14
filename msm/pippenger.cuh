@@ -15,6 +15,14 @@
 #include "sort.cuh"
 #include "batch_addition.cuh"
 
+// Optional hooks around the digit breakdown and each bucket pass. Define both
+// before including this header to time those kernels on their streams; the
+// defaults compile to nothing.
+#ifndef SPPARK_MSM_PROFILE_START
+# define SPPARK_MSM_PROFILE_START(stream) nullptr
+# define SPPARK_MSM_PROFILE_END(timer, stream) (void)(timer)
+#endif
+
 #ifndef WARP_SZ
 # define WARP_SZ 32
 #endif
@@ -409,6 +417,7 @@ private:
         while (grid_size & (grid_size - 1))
             grid_size -= (grid_size & (0 - grid_size));
 
+        auto digits_timer = SPPARK_MSM_PROFILE_START(gpu[2]);
         breakdown<<<2*grid_size, 1024, sizeof(scalar_t)*1024, gpu[2]>>>(
             d_digits, d_scalars, len, nwins, wbits, mont
         );
@@ -442,6 +451,7 @@ private:
                             wbits-1, top-1, 0u);
         }
 #endif
+        SPPARK_MSM_PROFILE_END(digits_timer, gpu[2]);
     }
 
 public:
@@ -504,6 +514,7 @@ public:
 
             for (uint32_t i = 0; i < batch; i++) {
                 gpu[i&1].wait(ev);
+                auto bucket_timer = SPPARK_MSM_PROFILE_START(gpu[i&1]);
 
                 batch_addition<bucket_t><<<gpu.sm_count(), BATCH_ADD_BLOCK_SIZE,
                                            0, gpu[i&1]>>>(
@@ -525,6 +536,7 @@ public:
                 );
                 CUDA_OK(cudaGetLastError());
 
+                SPPARK_MSM_PROFILE_END(bucket_timer, gpu[i&1]);
                 if (i < batch-1) {
                     h_off += stride;
                     num = h_off + stride <= npoints ? stride : npoints - h_off;

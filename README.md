@@ -19,7 +19,7 @@ sppark (pronounced 'spark') is **S**upranational's **p**erformance **p**rimitive
 
 ## Changes in this fork
 
-This fork, branch `dev`, carries two additions to upstream for the
+This fork, branch `dev`, carries these additions to upstream for the
 [multi-stark](https://github.com/argumentcomputer/multi-stark) prover; the
 arithmetic and the kernels' scheduling are upstream's.
 
@@ -34,6 +34,14 @@ arithmetic and the kernels' scheduling are upstream's.
   mixed-radix kernels taking the vector from the grid's second dimension
   and the permutation and coset passes looping over the batch. A batch of
   one is the unchanged single-vector path.
+
+- `gpu_t::sync` (`util/gpu_t.cuh`) selects its device before synchronizing
+  its streams, so a host thread that synchronizes every device in turn, as
+  NTT parameter setup does, waits in each stream's own context.
+- `SPPARK_MSM_PROFILE_START` and `SPPARK_MSM_PROFILE_END`
+  (`msm/pippenger.cuh`): optional hooks around the digit breakdown and each
+  bucket pass. Both default to nothing; an integrator defines them before
+  including the header to time those kernels on their streams.
 
 The runtime also supports `stream_t(id, cudaStream_t)` as a non-owning
 wrapper. Its destruction leaves the caller's stream alive; the caller must
