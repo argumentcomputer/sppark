@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, process::Command};
 
 #[cfg(unix)]
 const DEV_NULL: &str = "/dev/null";
@@ -24,9 +24,7 @@ pub fn ccmd() -> cc::Build {
     match target.as_str() {
         "cuda" => {
             fn is_cuda_flag_supported(nvcc: &cc::Build, flag: &str) -> bool {
-                let out = nvcc
-                    .get_compiler()
-                    .to_command()
+                let out = Command::new(nvcc.get_compiler().path())
                     .arg(flag)
                     .args(["--dryrun", "-c", "-x", "cu", DEV_NULL])
                     .output()
@@ -68,9 +66,7 @@ pub fn ccmd() -> cc::Build {
         }
         "rocm" => {
             fn is_rocm_flag_supported(hipcc: &cc::Build, flag: &str) -> bool {
-                let out = hipcc
-                    .get_compiler()
-                    .to_command()
+                let out = Command::new(hipcc.get_compiler().path())
                     .arg(flag)
                     .args(["-fsyntax-only", "-x", "hip", DEV_NULL])
                     .arg("-Wno-unused-command-line-argument")
