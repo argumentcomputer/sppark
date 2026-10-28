@@ -157,7 +157,8 @@ template<class bucket_t,
 __launch_bounds__(ACCUMULATE_NTHREADS) __global__
 void accumulate(bucket_h buckets_[], uint32_t nwins, uint32_t wbits,
                 /*const*/ affine_h points_[], const vec2d_t<uint32_t> digits,
-                const vec2d_t<uint32_t> histogram, uint32_t sid = 0)
+                const vec2d_t<uint32_t> histogram, uint32_t sid = 0,
+                uint32_t max_bucket_length = 0xffffffffu)
 {
     vec2d_t<bucket_h> buckets{buckets_, 1U<<--wbits};
     const affine_h* points = points_;
@@ -199,6 +200,7 @@ void accumulate(bucket_h buckets_[], uint32_t nwins, uint32_t wbits,
             idx = h[-1];
 
         if ((len -= idx) && !(x == 0 && y == 0)) {
+            len = min(len, max_bucket_length);
             const uint32_t* digs_ptr = &digits[y][idx];
             uint32_t digit = *digs_ptr++;
 
@@ -311,7 +313,7 @@ void accumulate<bucket_t, affine_t::mem_t>(bucket_t::mem_t buckets_[],
                                            /*const*/ affine_t::mem_t points_[],
                                            const vec2d_t<uint32_t> digits,
                                            const vec2d_t<uint32_t> histogram,
-                                           uint32_t sid);
+                                           uint32_t sid, uint32_t max_bucket_length);
 template __global__
 void batch_addition<bucket_t>(bucket_t::mem_t buckets[],
                               const affine_t::mem_t points[], size_t npoints,
@@ -329,6 +331,7 @@ void breakdown<scalar_t>(vec2d_t<uint32_t> digits, const scalar_t scalars[],
 #include <util/exception.cuh>
 #include <util/rusterror.h>
 #include <util/gpu_t.cuh>
+#include "split_buckets.cuh"
 
 template<class bucket_t, class point_t, class affine_t, class scalar_t,
          class affine_h = class affine_t::mem_t,
@@ -341,6 +344,8 @@ class msm_t {
     affine_h *d_points;
     scalar_t *d_scalars;
     vec2d_t<uint32_t> d_hist;
+    bool split_buckets_ = false;
+    msm_split_statistics split_statistics_{};
 
     template<typename T> using vec_t = slice_t<T>;
 
@@ -356,6 +361,15 @@ class msm_t {
     {   int ret=0; while (n>>=1) ret++; return ret;   }
 
 public:
+    void set_split_buckets(bool enabled) {
+        if (enabled && bucket_t::degree != 1) CUDA_OK(cudaErrorNotSupported);
+        split_buckets_ = enabled;
+    }
+    const msm_split_statistics& split_statistics() const { return split_statistics_; }
+    static size_t split_scratch_bytes(size_t count, uint32_t window, uint32_t windows) {
+        if (bucket_t::degree != 1) CUDA_OK(cudaErrorNotSupported);
+        return msm_split_geometry(count, window, windows, sizeof(bucket_h)).bytes;
+    }
     msm_t(const affine_t points[], size_t np,
           size_t ffi_affine_sz = sizeof(affine_t), int device_id = -1)
         : gpu(select_gpu(device_id)), d_points(nullptr), d_scalars(nullptr)
@@ -460,6 +474,11 @@ public:
                                    size_t ffi_affine_sz = sizeof(affine_t))
     {
         assert(this->npoints == 0 || npoints <= this->npoints);
+        split_statistics_ = msm_split_statistics{};
+        if (npoints == 0) {
+            out.inf();
+            return RustError{cudaSuccess};
+        }
 
         uint32_t lg_npoints = lg2(npoints + npoints/2);
         size_t batch = 1 << (std::max(lg_npoints, wbits) - wbits);
@@ -489,6 +508,19 @@ public:
             size_t digits_sz = nwins * stride * sizeof(uint32_t);
 
             dev_ptr_t<uint8_t> d_temp{temp_sz + digits_sz + d_point_sz, gpu[2]};
+            msm_split_geometry geometry;
+            if (split_buckets_)
+                geometry = msm_split_geometry(npoints, wbits, nwins, sizeof(bucket_h));
+            dev_ptr_t<uint8_t> split_storage{split_buckets_ ? geometry.bytes : 0, gpu};
+            msm_unwind_completion completion(gpu.cid());
+            if (split_buckets_) gpu.sync();
+            auto* split_header = split_buckets_ ? reinterpret_cast<msm_split_header*>(&split_storage[0]) : nullptr;
+            auto* split_ranges = split_buckets_ ? reinterpret_cast<uint2*>(&split_storage[geometry.ranges_offset]) : nullptr;
+            auto* split_tasks = split_buckets_ ? reinterpret_cast<uint4*>(&split_storage[geometry.tasks_offset]) : nullptr;
+            auto* split_heavy = split_buckets_ ? reinterpret_cast<uint32_t*>(&split_storage[geometry.heavy_offset]) : nullptr;
+            auto* split_partials = split_buckets_ ? reinterpret_cast<bucket_h*>(&split_storage[geometry.partials_offset]) : nullptr;
+            msm_split_timer classify_timer(split_buckets_), chunks_timer(split_buckets_), reduce_timer(split_buckets_);
+            msm_split_header split_sample{};
 
             vec2d_t<uint2> d_temps{&d_temp[0], stride};
             vec2d_t<uint32_t> d_digits{&d_temp[temp_sz], stride};
@@ -503,6 +535,14 @@ public:
             size_t num = stride > npoints ? npoints : stride;
             event_t ev;
 
+            // Point uploads on either bucket stream share the digit stream's
+            // asynchronous allocation, including before the first digit pass.
+            if (points) {
+                gpu[2].record(ev);
+                gpu[0].wait(ev);
+                gpu[1].wait(ev);
+            }
+
             if (scalars)
                 gpu[2].HtoD(&d_scalars[d_off], &scalars[h_off], num);
             digits(&d_scalars[0], num, d_digits, d_temps, mont);
@@ -515,6 +555,16 @@ public:
             for (uint32_t i = 0; i < batch; i++) {
                 gpu[i&1].wait(ev);
                 auto bucket_timer = SPPARK_MSM_PROFILE_START(gpu[i&1]);
+                if (split_buckets_) {
+                    classify_timer.start(gpu[i&1]);
+                    gpu[i&1].bzero(split_header, 1);
+                    msm_split_classify<<<gpu.sm_count()*4, 256, 0, gpu[i&1]>>>(
+                        d_hist, nwins, wbits, static_cast<uint32_t>(num), geometry.capacity,
+                        split_header, split_ranges, split_tasks, split_heavy);
+                    CUDA_OK(cudaGetLastError());
+                    classify_timer.stop(gpu[i&1]);
+                    chunks_timer.start(gpu[i&1]);
+                }
 
                 batch_addition<bucket_t><<<gpu.sm_count(), BATCH_ADD_BLOCK_SIZE,
                                            0, gpu[i&1]>>>(
@@ -525,8 +575,22 @@ public:
 
                 gpu[i&1].launch_coop(accumulate<bucket_t, affine_h>,
                     {gpu.sm_count(), 0},
-                    d_buckets, nwins, wbits, &d_points[d_off], d_digits, d_hist, i&1
+                    d_buckets, nwins, wbits, &d_points[d_off], d_digits, d_hist, i&1,
+                    split_buckets_ ? MSM_SPLIT_CHUNK : 0xffffffffu
                 );
+                if (split_buckets_) {
+                    msm_split_dispatch<bucket_t, affine_h>::accumulate(
+                        gpu[i&1], gpu.sm_count()*4, split_partials, &d_points[d_off],
+                        d_digits, wbits, split_tasks, split_header, geometry.capacity);
+                    chunks_timer.stop(gpu[i&1]);
+                    reduce_timer.start(gpu[i&1]);
+                    msm_split_dispatch<bucket_t, affine_h>::reduce(
+                        gpu[i&1], gpu.sm_count()*4, d_buckets, split_partials,
+                        split_ranges, split_heavy, split_header, geometry.capacity);
+                    reduce_timer.stop(gpu[i&1]);
+                }
+                // The next digit pass may overwrite its histogram only after
+                // every split chunk has consumed the current sorted indices.
                 gpu[i&1].record(ev);
 
                 integrate<bucket_t><<<nwins, MSM_NTHREADS,
@@ -565,8 +629,23 @@ public:
 
                 gpu[i&1].DtoH(ones, d_buckets + (nwins << (wbits-1)));
                 gpu[i&1].DtoH(res, d_buckets, sizeof(bucket_h)<<(wbits-1));
+                if (split_buckets_) gpu[i&1].DtoH(&split_sample, split_header, 1);
                 gpu[i&1].sync();
+                if (split_buckets_) {
+                    if (split_sample.overflow) CUDA_OK(cudaErrorInvalidValue);
+                    for (uint32_t window = 0; window < nwins; ++window) {
+                        split_statistics_.max_bucket[window] = std::max(split_statistics_.max_bucket[window], uint64_t(split_sample.max_bucket[window]));
+                        split_statistics_.chunk_count[window] += split_sample.chunk_count[window];
+                        split_statistics_.nonzero_digits[window] += split_sample.nonzero_digits[window];
+                        split_statistics_.zero_digits[window] += split_sample.zero_digits[window];
+                    }
+                    split_statistics_.unit_points += split_sample.unit_points;
+                    split_statistics_.classify_ms += classify_timer.elapsed();
+                    split_statistics_.chunks_ms += chunks_timer.elapsed();
+                    split_statistics_.reduce_ms += reduce_timer.elapsed();
+                }
             }
+            completion.complete();
         } catch (const cuda_error& e) {
             gpu.sync();
 #ifdef TAKE_RESPONSIBILITY_FOR_ERROR_MESSAGE

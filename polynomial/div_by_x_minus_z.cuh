@@ -6,6 +6,7 @@
     (defined(__CUDACC__) || defined(__HIPCC__))
 #define __SPPARK_POLYNOMIAL_DIVISION_CUH__
 
+#include <algorithm>
 #include <cassert>
 #ifdef __HIPCC__
 # include <hip/hip_cooperative_groups.h>
@@ -447,6 +448,8 @@ template<bool rotate = false, class fr_t, class stream_t>
 void div_by_x_minus_z(fr_t d_inout[], size_t len, const fr_t& z,
                       const stream_t& s, int gridDim = 0)
 {
+    if (len == 0)
+        return;
     if (gridDim <= 0)
         gridDim = s.sm_count();
 
@@ -455,16 +458,11 @@ void div_by_x_minus_z(fr_t d_inout[], size_t len, const fr_t& z,
     int blockDim = BSZ;
 
     if (BSZ == 0) {
-        static int saved_blockDim = 0;
-
-        if (saved_blockDim == 0) {
-            cudaFuncAttributes attr;
-            CUDA_OK(cudaFuncGetAttributes(&attr, d_div_by_x_minus_z<fr_t, N, rotate, BSZ>));
-            saved_blockDim = attr.maxThreadsPerBlock;
-            assert(saved_blockDim%WARP_SZ == 0);
-        }
-
-        blockDim = saved_blockDim;
+        // Kernel limits belong to the current device, not a shared host cache.
+        cudaFuncAttributes attr;
+        CUDA_OK(cudaFuncGetAttributes(&attr, d_div_by_x_minus_z<fr_t, N, rotate, BSZ>));
+        blockDim = attr.maxThreadsPerBlock;
+        assert(blockDim%WARP_SZ == 0);
     }
 
     if (gridDim > blockDim) // there are no such large GPUs, not for now...
@@ -478,7 +476,14 @@ void div_by_x_minus_z(fr_t d_inout[], size_t len, const fr_t& z,
     if (gridDim < 3)
         gridDim = 1;
 
-    size_t sharedSz = sizeof(fr_t) * max(blockDim/WARP_SZ, gridDim);
+    // A partial final tile can read the preceding tile's carry before it is
+    // published. Exact tiles or a single block avoid that cross-block race.
+    while (gridDim > 1 && len % (N * size_t(blockDim) * gridDim) != 0)
+        --gridDim;
+
+    // Every lane reads xchg[laneid], even when fewer warps or blocks write it.
+    size_t sharedSz = sizeof(fr_t) * std::max<size_t>(WARP_SZ,
+                          std::max<size_t>(blockDim/WARP_SZ, gridDim));
 
     s.launch_coop(d_div_by_x_minus_z<fr_t, N, rotate, BSZ>,
                   {gridDim, blockDim, sharedSz},

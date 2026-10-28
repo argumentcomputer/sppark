@@ -19,9 +19,8 @@ sppark (pronounced 'spark') is **S**upranational's **p**erformance **p**rimitive
 
 ## Changes in this fork
 
-This fork, branch `dev`, carries these additions to upstream for the
-[multi-stark](https://github.com/argumentcomputer/multi-stark) prover; the
-arithmetic and the kernels' scheduling are upstream's.
+This fork, branch `dev`, carries reusable acceleration primitives and
+integration hooks for downstream provers.
 
 - `SPPARK_NO_CXX_RUNTIME` (`util/exception.cuh`, `util/gpu_t.cuh`,
   `util/all_gpus.cpp`): a build mode in which `CUDA_OK` ends the process
@@ -42,11 +41,46 @@ arithmetic and the kernels' scheduling are upstream's.
   (`msm/pippenger.cuh`): optional hooks around the digit breakdown and each
   bucket pass. Both default to nothing; an integrator defines them before
   including the header to time those kernels on their streams.
+- `msm_t::set_split_buckets(true)` (`msm/pippenger.cuh`,
+  `msm/split_buckets.cuh`): opt-in G1 bucket splitting for concentrated scalar
+  distributions. Buckets longer than 256 points are accumulated as independent
+  chunks and reduced before integration; zero digits and the lowest-window
+  unit bucket retain their existing paths. Splitting defaults to off, and G2
+  MSMs retain their existing implementation. Enabling splitting for an
+  extension-field bucket reports `cudaErrorNotSupported`.
+  `split_scratch_bytes(count, window, windows)` reports additional device
+  scratch, and `split_statistics()` exposes counts and timings from the most
+  recent invocation. The split path supports the existing 10–18-bit windows,
+  up to 32 windows and up to `2^31` points, matching the signed digit index
+  limit. Splitting does not transform caller scalars. Point-upload streams
+  wait for the shared scratch allocation before using it.
+- `div_by_x_minus_z` (`polynomial/div_by_x_minus_z.cuh`): reserves shared
+  storage for every warp lane, queries kernel limits for the current device,
+  and selects an exact cooperative tile or a single block to avoid a
+  partial-tile carry race. Empty inputs are a no-op.
 
 The runtime also supports `stream_t(id, cudaStream_t)` as a non-owning
 wrapper. Its destruction leaves the caller's stream alive; the caller must
 keep it alive through every operation enqueued through the wrapper. The id
 is sppark's logical device index, which can differ from the CUDA ordinal.
+
+### Primitive regression tests
+
+`tests/cuda/run.py` builds a standalone BN254 MSM/division regression executable
+and compile-checks the existing BN254 and BLS12-381 G1/G2 wrappers. It requires
+CUDA, a compatible GPU, and an explicit BLST source root:
+
+```sh
+python3 tests/cuda/run.py --blst /path/to/blst --arch 120 --out /tmp/sppark-tests
+```
+
+Use `--compile-only` on a build host without a GPU. The tests compare MSMs
+against CPU scalar multiplication and polynomial division against CPU synthetic
+division. They cover split boundaries, multi-batch tails, signed and zero/unit
+scalars, equal/inverse/infinity points, host and device operands, Montgomery and
+canonical scalars, both division layouts, and concurrent stream launches. A
+shorter run is available as `/tmp/sppark-tests/primitives --quick`, including for
+`compute-sanitizer --tool memcheck` or `--tool racecheck`.
 
 ## General notes on implementation
 
